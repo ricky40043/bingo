@@ -56,6 +56,8 @@ docker compose up -d --build
 
 單一容器同時供應前端、API、WebSocket。對外部署時使用支援 WebSocket Upgrade 的 HTTPS 反向代理或 Cloudflare Tunnel，指向 8082。`FRONTEND_URL` 可指定 QR Code 對外網址；未指定時使用瀏覽器當前網址。
 
+正式環境部署在 `https://bingo.ricky-nova.com`，主機對外連接埠為 `20940`。推送到 GitHub `main` 後，GitHub Actions 會先執行後端測試與前端建置，再由專用 self-hosted runner 執行 `/home/ricky/deployments/scripts/deploy-app.sh bingo` 自動更新正式服務。
+
 ## 目錄與協定
 
 - `backend/game.go`：題庫、設定驗證、抽題、連線與得獎規則。

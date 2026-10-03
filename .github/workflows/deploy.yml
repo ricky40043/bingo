@@ -1,0 +1,42 @@
+name: Test and Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: bingo-production
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache-dependency-path: backend/go.sum
+      - name: Test backend
+        working-directory: backend
+        run: go test ./...
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Build frontend
+        working-directory: frontend
+        run: npm ci && npm run build
+
+  deploy:
+    needs: test
+    runs-on: [self-hosted, linux, x64, bingo]
+    steps:
+      - name: Deploy Bingo
+        run: /home/ricky/deployments/scripts/deploy-app.sh bingo
+      - name: Verify deployment
+        run: |
+          curl --fail --retry 12 --retry-delay 5 --retry-connrefused \
+            http://127.0.0.1:20940/api/health
