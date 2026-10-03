@@ -34,6 +34,7 @@ const custom = ref(false),
   customItems = ref(""),
   customTheme = ref(""),
   themeBank = ref<Record<string, string[]>>({}),
+  callerBank = ref<Record<string, string[]>>({}),
   baseUrl = ref(location.origin);
 const qr = ref(""),
   copied = ref(false),
@@ -143,6 +144,10 @@ const allCallerPlayersReady = computed(
 const normalizedCalled = computed(
   () => new Set((game.room?.called || []).map((value) => normalize(value))),
 );
+const callerSuggestions = computed(
+  () =>
+    callerBank.value[game.room?.settings.theme || settings.value.theme] || [],
+);
 const hist = computed(() =>
   Array.from({ length: (game.room?.settings.size || 4) * 2 + 3 }, (_, i) => ({
     lines: i,
@@ -169,7 +174,16 @@ watch(
       settings.value.theme = "大專學校";
       custom.value = false;
     } else if (
-      ["大專學校", "名人", "大台北捷運站"].includes(settings.value.theme)
+      [
+        "大專學校",
+        "名人",
+        "大台北捷運站",
+        "台灣縣市",
+        "國家與城市",
+        "台灣美食",
+        "動物",
+        "品牌",
+      ].includes(settings.value.theme)
     ) {
       settings.value.theme = "運動";
     }
@@ -340,6 +354,16 @@ function publishCall() {
   if (!callValue.value.trim()) return;
   if (game.send({ type: "call", value: callValue.value })) callValue.value = "";
 }
+function randomCallerAnswer() {
+  const available = callerSuggestions.value.filter(
+    (value) => !normalizedCalled.value.has(normalize(value)),
+  );
+  if (!available.length) {
+    game.error = "這個題庫的參考答案都已經公布過了";
+    return;
+  }
+  callValue.value = available[Math.floor(Math.random() * available.length)];
+}
 function isClaimable(index: number) {
   const answer = game.me?.answers[index];
   return !!answer && normalizedCalled.value.has(normalize(answer));
@@ -369,11 +393,13 @@ onMounted(async () => {
   game.init();
   timer = setInterval(() => (now.value = Date.now()), 1000);
   try {
-    const [themes, config] = await Promise.all([
+    const [themes, callerThemes, config] = await Promise.all([
       fetch("/api/themes").then((r) => r.json()),
+      fetch("/api/caller-themes").then((r) => r.json()),
       fetch("/api/config").then((r) => r.json()),
     ]);
     themeBank.value = themes;
+    callerBank.value = callerThemes;
     if (config.frontendUrl) baseUrl.value = config.frontendUrl;
   } catch {
     game.error = "題庫讀取失敗，請確認後端服務後重新整理";
@@ -510,6 +536,11 @@ onUnmounted(() => {
                   <option value="大專學校">🎓 大專學校</option>
                   <option value="名人">🌟 名人</option>
                   <option value="大台北捷運站">🚇 大台北捷運站</option>
+                  <option value="台灣縣市">🗺️ 台灣縣市</option>
+                  <option value="國家與城市">🌏 國家與城市</option>
+                  <option value="台灣美食">🍜 台灣美食</option>
+                  <option value="動物">🦁 動物</option>
+                  <option value="品牌">🏷️ 品牌</option>
                 </select>
                 <label
                   >分成幾組？
@@ -525,8 +556,9 @@ onUnmounted(() => {
                   </div>
                 </label>
                 <p class="field-help">
-                  玩家會依加入順序平均分到
-                  A、B、C…組，並在自己的手機填寫九個答案。
+                  玩家自行選擇 A、B、C…組，並在自己的手機填寫九個答案。此類別內建
+                  {{ callerBank[settings.theme]?.length || 0 }}
+                  個參考答案，也可以自由輸入。
                 </p>
               </template>
               <template v-else>
@@ -546,6 +578,11 @@ onUnmounted(() => {
                   <option value="運動">🏃 運動 · 動起來，認識你</option>
                   <option value="生活與興趣">☕ 生活與興趣 · 分享日常</option>
                   <option value="認識彼此">👋 認識彼此 · 從你好開始</option>
+                  <option value="美食">🍜 美食 · 找到同一種好味道</option>
+                  <option value="旅行">✈️ 旅行 · 交換走過的地方</option>
+                  <option value="校園生活">🎓 校園生活 · 聊聊青春回憶</option>
+                  <option value="職場交流">💼 職場交流 · 認識工作夥伴</option>
+                  <option value="影視娛樂">🎬 影視娛樂 · 分享你的片單</option>
                   <option value="custom">✎ 自訂主題與固定題庫</option>
                 </select>
                 <template v-if="custom"
@@ -883,10 +920,19 @@ onUnmounted(() => {
               <input
                 id="call-answer"
                 v-model="callValue"
+                list="caller-answer-bank"
                 maxlength="40"
-                :placeholder="`例如：${game.room.settings.theme === '大專學校' ? '臺灣大學' : game.room.settings.theme === '名人' ? '周杰倫' : '台北車站'}`"
+                :placeholder="`例如：${callerSuggestions[0] || '輸入答案'}`"
                 required
               />
+              <button
+                type="button"
+                class="secondary"
+                :disabled="game.busy || !callerSuggestions.length"
+                @click="randomCallerAnswer"
+              >
+                隨機帶入
+              </button>
               <button
                 class="primary"
                 :disabled="game.busy || !callValue.trim()"
@@ -894,6 +940,13 @@ onUnmounted(() => {
                 公布答案 →
               </button>
             </div>
+            <datalist id="caller-answer-bank">
+              <option
+                v-for="answer in callerSuggestions"
+                :key="answer"
+                :value="answer"
+              />
+            </datalist>
           </form>
           <div v-if="callerMode" class="called-board">
             <div v-if="!game.room.called.length" class="empty-state compact">
@@ -1342,12 +1395,20 @@ onUnmounted(() => {
           <label
             >你的答案<input
               v-model="answerValue"
+              list="player-answer-bank"
               autofocus
               maxlength="40"
               required
               :disabled="game.busy"
               placeholder="輸入一個答案"
           /></label>
+          <datalist id="player-answer-bank">
+            <option
+              v-for="answer in callerSuggestions"
+              :key="answer"
+              :value="answer"
+            />
+          </datalist>
           <button
             class="primary full"
             :disabled="game.busy || !answerValue.trim()"

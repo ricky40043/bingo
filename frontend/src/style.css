@@ -917,10 +917,12 @@ footer {
 }
 .call-console > div {
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
 }
 .call-console input {
-  flex: 1;
+  flex: 1 1 190px;
+  min-width: 0;
 }
 .call-console .primary {
   white-space: nowrap;

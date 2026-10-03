@@ -387,6 +387,7 @@ func main() {
 	router.Use(gin.Recovery())
 	router.GET("/api/health", func(c *gin.Context) { c.JSON(200, gin.H{"status": "ok"}) })
 	router.GET("/api/themes", func(c *gin.Context) { c.JSON(200, themes) })
+	router.GET("/api/caller-themes", func(c *gin.Context) { c.JSON(200, callerThemes) })
 	router.GET("/api/config", func(c *gin.Context) { c.JSON(200, gin.H{"frontendUrl": os.Getenv("FRONTEND_URL")}) })
 	router.GET("/api/rooms/:id", func(c *gin.Context) {
 		s.mu.Lock()

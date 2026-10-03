@@ -80,6 +80,51 @@ func TestSettings(t *testing.T) {
 	}
 }
 
+func TestQuestionBanks(t *testing.T) {
+	if len(themes) < 8 {
+		t.Fatalf("expected at least 8 social themes, got %d", len(themes))
+	}
+	if len(callerThemes) < 8 {
+		t.Fatalf("expected at least 8 caller themes, got %d", len(callerThemes))
+	}
+	check := func(kind string, banks map[string][]string, minimum int) {
+		t.Helper()
+		for theme, questions := range banks {
+			if len(questions) < minimum {
+				t.Errorf("%s theme %q has only %d questions", kind, theme, len(questions))
+			}
+			seen := map[string]bool{}
+			for _, question := range questions {
+				normalized := normalizeAnswer(question)
+				if normalized == "" {
+					t.Errorf("%s theme %q contains an empty question", kind, theme)
+				}
+				if seen[normalized] {
+					t.Errorf("%s theme %q contains duplicate %q", kind, theme, question)
+				}
+				seen[normalized] = true
+			}
+		}
+	}
+	check("social", themes, 40)
+	check("caller", callerThemes, 22)
+
+	for theme := range themes {
+		room, err := newRoom("TEST", Settings{Size: 4, Theme: theme, Target: 1, Winners: 1, JoinMode: "auto", Mode: "social"})
+		if err != nil {
+			t.Errorf("social theme %q rejected: %v", theme, err)
+		} else if len(room.Board) != 16 {
+			t.Errorf("social theme %q drew %d questions", theme, len(room.Board))
+		}
+	}
+	for theme := range callerThemes {
+		settings := Settings{Size: 3, Theme: theme, Target: 1, Winners: 1, JoinMode: "auto", Mode: "caller", Groups: 2}
+		if err := validate(&settings); err != nil {
+			t.Errorf("caller theme %q rejected: %v", theme, err)
+		}
+	}
+}
+
 func TestAutomaticNicknamesAreUnique(t *testing.T) {
 	r, err := newRoom("TEST", Settings{Size: 3, Theme: "運動", Target: 1, Winners: 1, JoinMode: "auto"})
 	if err != nil {
