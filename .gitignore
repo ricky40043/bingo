@@ -1,0 +1,6 @@
+node_modules/
+frontend/dist/
+backend/.bingo-server
+.env
+.DS_Store
+tests/artifacts/

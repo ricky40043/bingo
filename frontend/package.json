@@ -1,0 +1,25 @@
+{
+  "name": "bingo-game",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview --host"
+  },
+  "dependencies": {
+    "vue": "^3.4.21",
+    "pinia": "^2.1.7",
+    "qrcode": "^1.5.3",
+    "canvas-confetti": "^1.9.3"
+  },
+  "devDependencies": {
+    "@types/qrcode": "^1.5.5",
+    "@types/canvas-confetti": "^1.6.4",
+    "@vitejs/plugin-vue": "^5.0.4",
+    "typescript": "~5.4.5",
+    "vite": "^5.2.8",
+    "vue-tsc": "^2.0.13"
+  }
+}
