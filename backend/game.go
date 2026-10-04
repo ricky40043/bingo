@@ -40,19 +40,39 @@ type Player struct {
 	Answers    map[int]string    `json:"-"`
 	Ready      bool              `json:"ready"`
 }
+type TurnProposal struct {
+	ID         string `json:"id"`
+	PlayerID   string `json:"playerId"`
+	PlayerName string `json:"playerName"`
+	Group      string `json:"group"`
+	Answer     string `json:"answer"`
+}
+type MatchAppeal struct {
+	ID         string `json:"id"`
+	PlayerID   string `json:"playerId"`
+	PlayerName string `json:"playerName"`
+	Group      string `json:"group"`
+	Index      int    `json:"index"`
+	Answer     string `json:"answer"`
+	Called     string `json:"called"`
+}
 type Room struct {
-	ID         string    `json:"id"`
-	Settings   Settings  `json:"settings"`
-	Board      []string  `json:"board"`
-	Status     string    `json:"status"`
-	Players    []*Player `json:"players"`
-	Winners    []*Player `json:"winners"`
-	StartedAt  int64     `json:"startedAt"`
-	Round      int       `json:"round"`
-	HostOnline bool      `json:"hostOnline"`
-	HostToken  string    `json:"-"`
-	Updated    time.Time `json:"-"`
-	Called     []string  `json:"called"`
+	ID              string            `json:"id"`
+	Settings        Settings          `json:"settings"`
+	Board           []string          `json:"board"`
+	Status          string            `json:"status"`
+	Players         []*Player         `json:"players"`
+	Winners         []*Player         `json:"winners"`
+	StartedAt       int64             `json:"startedAt"`
+	Round           int               `json:"round"`
+	HostOnline      bool              `json:"hostOnline"`
+	HostToken       string            `json:"-"`
+	Updated         time.Time         `json:"-"`
+	Called          []string          `json:"called"`
+	TurnIndex       int               `json:"turnIndex"`
+	Pending         *TurnProposal     `json:"pending,omitempty"`
+	Appeals         []*MatchAppeal    `json:"appeals"`
+	ApprovedMatches map[string]string `json:"approvedMatches"`
 }
 
 var nicknameAdjectives = []string{
@@ -88,7 +108,7 @@ func validate(s *Settings) error {
 	if s.Mode == "" {
 		s.Mode = "social"
 	}
-	if s.Mode != "social" && s.Mode != "caller" {
+	if s.Mode != "social" && s.Mode != "caller" && s.Mode != "turns" {
 		return errors.New("遊戲模式設定錯誤")
 	}
 	if s.JoinMode == "" {
@@ -97,8 +117,12 @@ func validate(s *Settings) error {
 	if s.JoinMode != "name" && s.JoinMode != "auto" {
 		return errors.New("加入方式設定錯誤")
 	}
-	if s.Mode == "caller" {
-		s.Size = 3
+	if s.Mode == "caller" || s.Mode == "turns" {
+		if s.Mode == "caller" {
+			s.Size = 3
+		} else {
+			s.Size = 4
+		}
 		if s.Groups < 2 || s.Groups > 12 {
 			return errors.New("分組數需介於 2–12 組")
 		}
@@ -116,7 +140,7 @@ func validate(s *Settings) error {
 	if s.Theme == "" || utf8.RuneCountInString(s.Theme) > 80 {
 		return errors.New("請填寫主題（最多 80 字）")
 	}
-	if s.Mode == "caller" {
+	if s.Mode == "caller" || s.Mode == "turns" {
 		if _, exists := callerThemes[s.Theme]; !exists {
 			return errors.New("請選擇有效的猜答案題目類別")
 		}
@@ -178,8 +202,8 @@ func (r *Room) randomNickname() (string, error) {
 	return "", errors.New("無法產生自動暱稱")
 }
 func draw(s Settings) []string {
-	if s.Mode == "caller" {
-		return make([]string, 9)
+	if s.Mode == "caller" || s.Mode == "turns" {
+		return make([]string, s.Size*s.Size)
 	}
 	a := append([]string(nil), s.Items...)
 	for i := len(a) - 1; i > 0; i-- {
@@ -193,7 +217,11 @@ func newRoom(id string, s Settings) (*Room, error) {
 	if err := validate(&s); err != nil {
 		return nil, err
 	}
-	return &Room{ID: id, Settings: s, Board: draw(s), Status: "lobby", Players: []*Player{}, Winners: []*Player{}, HostToken: token(), Updated: time.Now(), Round: 1, Called: []string{}}, nil
+	return &Room{
+		ID: id, Settings: s, Board: draw(s), Status: "lobby", Players: []*Player{},
+		Winners: []*Player{}, HostToken: token(), Updated: time.Now(), Round: 1,
+		Called: []string{}, Appeals: []*MatchAppeal{}, ApprovedMatches: map[string]string{},
+	}, nil
 }
 
 func groupLabel(index int) string {
@@ -206,10 +234,11 @@ func normalizeAnswer(value string) string {
 }
 
 func (r *Room) setAnswer(p *Player, index int, answer string) error {
-	if r.Settings.Mode != "caller" || r.Status != "lobby" {
+	if (r.Settings.Mode != "caller" && r.Settings.Mode != "turns") || r.Status != "lobby" {
 		return errors.New("現在不能修改答案")
 	}
-	if index < 0 || index >= 9 {
+	boardCount := r.Settings.Size * r.Settings.Size
+	if index < 0 || index >= boardCount {
 		return errors.New("無效的格子")
 	}
 	answer = strings.TrimSpace(answer)
@@ -218,11 +247,11 @@ func (r *Room) setAnswer(p *Player, index int, answer string) error {
 	}
 	for answerIndex, existing := range p.Answers {
 		if answerIndex != index && normalizeAnswer(existing) == normalizeAnswer(answer) {
-			return errors.New("九宮格內不能填寫重複答案")
+			return errors.New("賓果卡內不能填寫重複答案")
 		}
 	}
 	p.Answers[index] = answer
-	p.Ready = len(p.Answers) == 9
+	p.Ready = len(p.Answers) == boardCount
 	return nil
 }
 
@@ -244,32 +273,196 @@ func (r *Room) callAnswer(answer string) error {
 	return nil
 }
 
+func (r *Room) answerMatches(answer string) bool {
+	normalized := normalizeAnswer(answer)
+	for _, called := range r.Called {
+		calledNormalized := normalizeAnswer(called)
+		if normalized == calledNormalized || r.ApprovedMatches[normalized] == calledNormalized {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *Room) claim(p *Player, index int) error {
-	if r.Settings.Mode != "caller" || r.Status != "playing" {
+	if (r.Settings.Mode != "caller" && r.Settings.Mode != "turns") || r.Status != "playing" {
 		return errors.New("現在不能圈選答案")
 	}
 	if p.Rank > 0 {
 		return errors.New("你已達標，請等待其他玩家")
 	}
 	answer, ok := p.Answers[index]
-	if !ok || index < 0 || index >= 9 {
+	if !ok || index < 0 || index >= r.Settings.Size*r.Settings.Size {
 		return errors.New("這一格還沒有答案")
 	}
 	if _, marked := p.Marks[index]; marked {
 		return errors.New("這一格已經圈選")
 	}
-	matched := false
-	for _, called := range r.Called {
-		if normalizeAnswer(called) == normalizeAnswer(answer) {
-			matched = true
-			break
-		}
-	}
-	if !matched {
+	if !r.answerMatches(answer) {
 		return errors.New("主持人還沒有公布這個答案")
 	}
 	p.Marks[index] = Signature{Name: answer}
 	r.updateProgress(p)
+	return nil
+}
+
+func (r *Room) activeGroup() string {
+	return groupLabel(r.TurnIndex)
+}
+
+func (r *Room) groupHasPlayers(group string) bool {
+	for _, player := range r.Players {
+		if player.Group == group {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *Room) advanceTurn() {
+	for offset := 1; offset <= r.Settings.Groups; offset++ {
+		next := (r.TurnIndex + offset) % r.Settings.Groups
+		if r.groupHasPlayers(groupLabel(next)) {
+			r.TurnIndex = next
+			return
+		}
+	}
+}
+
+func (r *Room) initializeTurn() {
+	r.TurnIndex = 0
+	if r.groupHasPlayers(groupLabel(0)) {
+		return
+	}
+	for index := 1; index < r.Settings.Groups; index++ {
+		if r.groupHasPlayers(groupLabel(index)) {
+			r.TurnIndex = index
+			return
+		}
+	}
+}
+
+func (r *Room) propose(p *Player, index int) error {
+	if r.Settings.Mode != "turns" || r.Status != "playing" {
+		return errors.New("目前不能提出答案")
+	}
+	if p.Group != r.activeGroup() {
+		return errors.New("還沒輪到你的組別")
+	}
+	if r.Pending != nil {
+		return errors.New("主持人正在審核本組提出的答案")
+	}
+	answer, ok := p.Answers[index]
+	if !ok || index < 0 || index >= r.Settings.Size*r.Settings.Size {
+		return errors.New("這一格還沒有答案")
+	}
+	if r.answerMatches(answer) {
+		return errors.New("這個答案已經公布過了")
+	}
+	r.Pending = &TurnProposal{
+		ID: token()[:12], PlayerID: p.ID, PlayerName: p.Name,
+		Group: p.Group, Answer: answer,
+	}
+	return nil
+}
+
+func (r *Room) reviewProposal(id, decision string) error {
+	if r.Settings.Mode != "turns" || r.Status != "playing" || r.Pending == nil || r.Pending.ID != id {
+		return errors.New("找不到這筆待審答案")
+	}
+	switch decision {
+	case "approve":
+		answer := r.Pending.Answer
+		for _, called := range r.Called {
+			if normalizeAnswer(called) == normalizeAnswer(answer) {
+				return errors.New("這個答案已經公布過了")
+			}
+		}
+		r.Called = append(r.Called, answer)
+		r.Pending = nil
+		r.advanceTurn()
+	case "reject":
+		r.Pending = nil
+	default:
+		return errors.New("無效的審核決定")
+	}
+	return nil
+}
+
+func (r *Room) skipTurn() error {
+	if r.Settings.Mode != "turns" || r.Status != "playing" {
+		return errors.New("目前不能跳過組別")
+	}
+	r.Pending = nil
+	r.advanceTurn()
+	return nil
+}
+
+func (r *Room) requestMatch(p *Player, index int, called string) error {
+	if r.Settings.Mode != "turns" || r.Status != "playing" {
+		return errors.New("目前不能提出同答案申請")
+	}
+	answer, ok := p.Answers[index]
+	if !ok || index < 0 || index >= r.Settings.Size*r.Settings.Size {
+		return errors.New("請選擇自己的有效答案")
+	}
+	called = strings.TrimSpace(called)
+	found := false
+	for _, existing := range r.Called {
+		if normalizeAnswer(existing) == normalizeAnswer(called) {
+			called = existing
+			found = true
+			break
+		}
+	}
+	if !found {
+		return errors.New("請選擇已通過的公布答案")
+	}
+	if r.answerMatches(answer) {
+		return errors.New("這個答案已經可以直接圈選")
+	}
+	for _, appeal := range r.Appeals {
+		if appeal.PlayerID == p.ID && appeal.Index == index && normalizeAnswer(appeal.Called) == normalizeAnswer(called) {
+			return errors.New("這筆申請正在等待主持人審核")
+		}
+	}
+	r.Appeals = append(r.Appeals, &MatchAppeal{
+		ID: token()[:12], PlayerID: p.ID, PlayerName: p.Name, Group: p.Group,
+		Index: index, Answer: answer, Called: called,
+	})
+	return nil
+}
+
+func (r *Room) reviewAppeal(id, decision string) error {
+	if r.Settings.Mode != "turns" || r.Status != "playing" {
+		return errors.New("目前不能審核同答案申請")
+	}
+	index := -1
+	for appealIndex, appeal := range r.Appeals {
+		if appeal.ID == id {
+			index = appealIndex
+			break
+		}
+	}
+	if index < 0 {
+		return errors.New("找不到這筆同答案申請")
+	}
+	appeal := r.Appeals[index]
+	if decision == "approve" {
+		r.ApprovedMatches[normalizeAnswer(appeal.Answer)] = normalizeAnswer(appeal.Called)
+		remaining := r.Appeals[:0]
+		for _, candidate := range r.Appeals {
+			if normalizeAnswer(candidate.Answer) != normalizeAnswer(appeal.Answer) ||
+				normalizeAnswer(candidate.Called) != normalizeAnswer(appeal.Called) {
+				remaining = append(remaining, candidate)
+			}
+		}
+		r.Appeals = remaining
+	} else if decision != "reject" {
+		return errors.New("無效的審核決定")
+	} else {
+		r.Appeals = append(r.Appeals[:index], r.Appeals[index+1:]...)
+	}
 	return nil
 }
 

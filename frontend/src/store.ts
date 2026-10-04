@@ -7,7 +7,7 @@ export interface Settings {
   winners: number;
   items: string[];
   joinMode: "auto" | "name";
-  mode: "social" | "caller";
+  mode: "social" | "caller" | "turns";
   groups: number;
 }
 export interface Signature {
@@ -26,6 +26,22 @@ export interface Player {
   group?: string;
   ready: boolean;
 }
+export interface TurnProposal {
+  id: string;
+  playerId: string;
+  playerName: string;
+  group: string;
+  answer: string;
+}
+export interface MatchAppeal {
+  id: string;
+  playerId: string;
+  playerName: string;
+  group: string;
+  index: number;
+  answer: string;
+  called: string;
+}
 export interface Room {
   id: string;
   settings: Settings;
@@ -37,6 +53,10 @@ export interface Room {
   round: number;
   hostOnline: boolean;
   called: string[];
+  turnIndex: number;
+  pending?: TurnProposal;
+  appeals: MatchAppeal[];
+  approvedMatches: Record<string, string>;
 }
 interface Session {
   room: string;
@@ -56,7 +76,8 @@ export const useGame = defineStore("game", () => {
     error = ref(""),
     busy = ref(false),
     fatal = ref(false),
-    winnerBoards = ref<Record<string, Record<number, Signature>>>({});
+    winnerBoards = ref<Record<string, Record<number, Signature>>>({}),
+    playerAnswers = ref<Record<string, Record<number, string>>>({});
   let socket: WebSocket | undefined,
     session: Session | undefined,
     retry: ReturnType<typeof setTimeout> | undefined,
@@ -124,6 +145,7 @@ export const useGame = defineStore("game", () => {
         me.value = data.me;
         host.value = data.host;
         winnerBoards.value = data.winnerBoards || {};
+        playerAnswers.value = data.playerAnswers || {};
         ready.value = true;
         error.value = "";
         settle();
@@ -192,6 +214,7 @@ export const useGame = defineStore("game", () => {
     busy,
     fatal,
     winnerBoards,
+    playerAnswers,
     init,
     send,
     leave,

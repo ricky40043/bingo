@@ -191,6 +191,112 @@ func TestCallerModeAnswerCallAndClaim(t *testing.T) {
 		t.Fatalf("caller bingo failed: rank=%d lines=%d status=%s", p.Rank, p.Lines, r.Status)
 	}
 }
+func TestTurnModeReviewFlow(t *testing.T) {
+	r, err := newRoom("TURNS", Settings{
+		Theme: "大專學校", Target: 1, Winners: 2,
+		JoinMode: "auto", Mode: "turns", Groups: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Settings.Size != 4 || len(r.Board) != 16 {
+		t.Fatalf("turn mode should force a 4x4 board: %+v", r.Settings)
+	}
+	a := &Player{ID: "a", Name: "A玩家", Group: "A組", Marks: map[int]Signature{}, Answers: map[int]string{}}
+	c := &Player{ID: "c", Name: "C玩家", Group: "C組", Marks: map[int]Signature{}, Answers: map[int]string{}}
+	r.Players = []*Player{a, c}
+	for index := 0; index < 16; index++ {
+		aAnswer := fmt.Sprintf("A答案%d", index)
+		cAnswer := fmt.Sprintf("C答案%d", index)
+		if index == 0 {
+			aAnswer = "台灣大學"
+			cAnswer = "台彎大學"
+		}
+		if index == 1 {
+			aAnswer = "北大"
+			cAnswer = "台北大學"
+		}
+		if err := r.setAnswer(a, index, aAnswer); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.setAnswer(c, index, cAnswer); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !a.Ready || !c.Ready {
+		t.Fatal("players should be ready after filling 16 answers")
+	}
+	r.Status = "playing"
+	r.initializeTurn()
+	if r.activeGroup() != "A組" {
+		t.Fatalf("expected A組 first, got %s", r.activeGroup())
+	}
+	if err := r.propose(c, 0); err == nil {
+		t.Fatal("non-active group proposed an answer")
+	}
+	if err := r.propose(a, 0); err != nil {
+		t.Fatal(err)
+	}
+	firstProposal := r.Pending.ID
+	if err := r.reviewProposal(firstProposal, "reject"); err != nil {
+		t.Fatal(err)
+	}
+	if r.activeGroup() != "A組" || r.Pending != nil {
+		t.Fatal("reject should let the same group choose again")
+	}
+	if err := r.propose(a, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.reviewProposal(r.Pending.ID, "approve"); err != nil {
+		t.Fatal(err)
+	}
+	if r.activeGroup() != "C組" {
+		t.Fatalf("empty B組 should be skipped, got %s", r.activeGroup())
+	}
+	if err := r.claim(a, 0); err != nil {
+		t.Fatalf("exact answer should be claimable: %v", err)
+	}
+	if err := r.claim(c, 0); err == nil {
+		t.Fatal("misspelled answer was claimable before review")
+	}
+	if err := r.requestMatch(c, 0, "臺灣大學"); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Appeals) != 1 {
+		t.Fatalf("expected one appeal, got %d", len(r.Appeals))
+	}
+	if err := r.reviewAppeal(r.Appeals[0].ID, "approve"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.claim(c, 0); err != nil {
+		t.Fatalf("approved misspelling should be claimable: %v", err)
+	}
+	if err := r.propose(c, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.reviewProposal(r.Pending.ID, "approve"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.requestMatch(a, 1, "台北大學"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.reviewAppeal(r.Appeals[0].ID, "reject"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.claim(a, 1); err == nil {
+		t.Fatal("rejected abbreviation became claimable")
+	}
+	if r.activeGroup() != "A組" {
+		t.Fatalf("expected A組 after C組 approval, got %s", r.activeGroup())
+	}
+	if err := r.skipTurn(); err != nil {
+		t.Fatal(err)
+	}
+	if r.activeGroup() != "C組" {
+		t.Fatalf("skip should advance to C組, got %s", r.activeGroup())
+	}
+}
+
 func TestSignRules(t *testing.T) {
 	r, _ := newRoom("TEST", config(3, 1, 1))
 	p := &Player{Marks: map[int]Signature{}}
@@ -471,6 +577,67 @@ func TestCallerWebSocketFlow(t *testing.T) {
 	if room.Status != "finished" || len(room.Winners) != 1 || room.Winners[0].Group != "A組" {
 		t.Fatalf("caller websocket game did not finish: %+v", room)
 	}
+}
+
+func TestTurnWebSocketReviewAndHostAnswerVisibility(t *testing.T) {
+	_, url := testServer(t)
+	host := dialPeer(t, url)
+	host.send(Message{Type: "create", Settings: Settings{
+		Theme: "大專學校", Target: 1, Winners: 1,
+		JoinMode: "auto", Mode: "turns", Groups: 2,
+	}})
+	host.session()
+	host.receive("state")
+
+	player := dialPeer(t, url)
+	player.send(Message{Type: "join", Room: host.room, Group: "A組"})
+	player.session()
+	player.receive("state")
+	host.receive("state")
+	var latestHostState map[string]json.RawMessage
+	for index := 0; index < 16; index++ {
+		answer := fmt.Sprintf("答案%d", index)
+		if index == 0 {
+			answer = "台灣大學"
+		}
+		if index == 1 {
+			answer = "北大"
+		}
+		player.send(Message{Type: "answer", Index: index, Value: answer})
+		player.receive("state")
+		latestHostState = host.receive("state")
+	}
+	var answers map[string]map[int]string
+	json.Unmarshal(latestHostState["playerAnswers"], &answers)
+	if len(answers) != 1 {
+		t.Fatalf("host answer board missing: %v", answers)
+	}
+	for _, board := range answers {
+		if len(board) != 16 {
+			t.Fatalf("host answer board incomplete: %v", board)
+		}
+	}
+	host.send(Message{Type: "start"})
+	var room Room
+	for {
+		state := player.receive("state")
+		json.Unmarshal(state["room"], &room)
+		if room.Status == "playing" {
+			break
+		}
+	}
+	if room.Settings.Size != 4 || room.TurnIndex != 0 {
+		t.Fatalf("unexpected turn start: %+v", room)
+	}
+
+	player.send(Message{Type: "propose", Index: 0})
+	state := player.receive("state")
+	json.Unmarshal(state["room"], &room)
+	if room.Pending == nil || room.Pending.Answer != "台灣大學" {
+		t.Fatalf("proposal missing: %+v", room.Pending)
+	}
+	player.send(Message{Type: "proposal_decision", ID: room.Pending.ID, Decision: "approve"})
+	player.receive("error")
 }
 
 func TestConcurrentWinnersAndDuplicateNames(t *testing.T) {

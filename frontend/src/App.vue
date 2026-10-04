@@ -15,7 +15,7 @@ const roomCode = ref(initialQuery.get("room") || ""),
   playerName = ref(""),
   selectedGroup = ref("");
 const roomInfo = ref<{
-  mode: "social" | "caller";
+  mode: "social" | "caller" | "turns";
   joinMode: "auto" | "name";
   groups: number;
   theme: string;
@@ -46,7 +46,10 @@ const qr = ref(""),
   inspectedWinner = ref<Player | null>(null),
   answerCell = ref<number | null>(null),
   answerValue = ref(""),
-  callValue = ref("");
+  callValue = ref(""),
+  appealOpen = ref(false),
+  appealIndex = ref<number | null>(null),
+  appealCalled = ref("");
 let timer: ReturnType<typeof setInterval>,
   popupTimer: ReturnType<typeof setTimeout>,
   audio: AudioContext | undefined;
@@ -57,7 +60,11 @@ const current = computed(() =>
   game.room?.players.find((p) => p.id === game.me?.id),
 );
 const joiningCaller = computed(
-  () => linkedMode === "caller" || roomInfo.value?.mode === "caller",
+  () =>
+    linkedMode === "caller" ||
+    linkedMode === "turns" ||
+    roomInfo.value?.mode === "caller" ||
+    roomInfo.value?.mode === "turns",
 );
 const joiningAutomatically = computed(
   () => autoJoin || roomInfo.value?.joinMode === "auto",
@@ -77,8 +84,8 @@ const joinUrl = computed(() => {
   if (!game.room) return "";
   const query = new URLSearchParams({ room: game.room.id });
   if (game.room.settings.joinMode === "auto") query.set("join", "auto");
-  if (game.room.settings.mode === "caller") {
-    query.set("mode", "caller");
+  if (game.room.settings.mode !== "social") {
+    query.set("mode", game.room.settings.mode);
     query.set("groups", String(game.room.settings.groups));
   }
   return `${baseUrl.value.replace(/\/$/, "")}/?${query.toString()}`;
@@ -135,7 +142,26 @@ const canSign = computed(
     !game.busy &&
     !current.value?.rank,
 );
-const callerMode = computed(() => game.room?.settings.mode === "caller");
+const callerMode = computed(
+  () =>
+    game.room?.settings.mode === "caller" ||
+    game.room?.settings.mode === "turns",
+);
+const turnMode = computed(() => game.room?.settings.mode === "turns");
+const answerCount = computed(
+  () => (game.room?.settings.size || settings.value.size) ** 2,
+);
+const activeGroup = computed(() =>
+  game.room ? String.fromCharCode(65 + game.room.turnIndex) + "組" : "",
+);
+const myTurn = computed(
+  () =>
+    turnMode.value &&
+    game.room?.status === "playing" &&
+    current.value?.group === activeGroup.value &&
+    !game.room.pending &&
+    !current.value?.rank,
+);
 const allCallerPlayersReady = computed(
   () =>
     !callerMode.value ||
@@ -169,8 +195,8 @@ watch(
 watch(
   () => settings.value.mode,
   (mode) => {
-    if (mode === "caller") {
-      settings.value.size = 3;
+    if (mode === "caller" || mode === "turns") {
+      settings.value.size = mode === "caller" ? 3 : 4;
       settings.value.theme = "大專學校";
       custom.value = false;
     } else if (
@@ -366,12 +392,37 @@ function randomCallerAnswer() {
 }
 function isClaimable(index: number) {
   const answer = game.me?.answers[index];
-  return !!answer && normalizedCalled.value.has(normalize(answer));
+  if (!answer || !game.room) return false;
+  const normalized = normalize(answer);
+  return (
+    normalizedCalled.value.has(normalized) ||
+    normalizedCalled.value.has(game.room.approvedMatches?.[normalized] || "")
+  );
 }
 function claim(index: number) {
   if (isClaimable(index) && !game.me?.marks[index]) {
     game.send({ type: "claim", index });
   }
+}
+function propose(index: number) {
+  if (myTurn.value) game.send({ type: "propose", index });
+}
+function openAppeal() {
+  if (!game.room?.called.length) return;
+  appealIndex.value = null;
+  appealCalled.value = game.room.called[game.room.called.length - 1];
+  appealOpen.value = true;
+}
+function submitAppeal() {
+  if (appealIndex.value === null || !appealCalled.value) return;
+  if (
+    game.send({
+      type: "appeal",
+      index: appealIndex.value,
+      called: appealCalled.value,
+    })
+  )
+    appealOpen.value = false;
 }
 function chooseGroup(group: string) {
   selectedGroup.value = group;
@@ -496,8 +547,17 @@ onUnmounted(() => {
                   :class="{ active: settings.mode === 'caller' }"
                   @click="settings.mode = 'caller'"
                 >
-                  <span class="grid-icon">◎</span><b>分組猜答案</b
+                  <span class="grid-icon">◎</span><b>主持人出題</b
                   ><small>填九宮格、聽題圈選</small>
+                </button>
+                <button
+                  type="button"
+                  class="size-choice"
+                  :class="{ active: settings.mode === 'turns' }"
+                  @click="settings.mode = 'turns'"
+                >
+                  <span class="grid-icon">↻</span><b>分組輪流出題</b
+                  ><small>填十六格、各組輪流選</small>
                 </button>
               </div>
             </fieldset>
@@ -527,10 +587,12 @@ onUnmounted(() => {
               <legend>
                 03
                 <span>{{
-                  settings.mode === "caller" ? "選擇題目類別" : "今天聊什麼？"
+                  settings.mode !== "social"
+                    ? "選擇題目類別"
+                    : "今天聊什麼？"
                 }}</span>
               </legend>
-              <template v-if="settings.mode === 'caller'">
+              <template v-if="settings.mode !== 'social'">
                 <label class="sr-only" for="caller-theme">題目類別</label>
                 <select id="caller-theme" v-model="settings.theme">
                   <option value="大專學校">🎓 大專學校</option>
@@ -556,9 +618,14 @@ onUnmounted(() => {
                   </div>
                 </label>
                 <p class="field-help">
-                  玩家自行選擇 A、B、C…組，並在自己的手機填寫九個答案。此類別內建
+                  玩家自行選擇 A、B、C…組，並在自己的手機填寫
+                  {{ settings.mode === "turns" ? "十六個" : "九個" }}
+                  答案。此類別內建
                   {{ callerBank[settings.theme]?.length || 0 }}
-                  個參考答案，也可以自由輸入。
+                  個參考答案，也可以自由輸入。<template
+                    v-if="settings.mode === 'turns'"
+                    >遊戲開始後各組輪流選一題，由主持人審核。</template
+                  >
                 </p>
               </template>
               <template v-else>
@@ -810,8 +877,10 @@ onUnmounted(() => {
               game.room.status === "lobby"
                 ? "人到齊，就開始。"
                 : game.room.status === "playing"
-                  ? callerMode
-                    ? "聽清楚，準備圈答案。"
+                  ? turnMode
+                    ? "輪到哪一組，就由哪一組出題。"
+                    : callerMode
+                      ? "聽清楚，準備圈答案。"
                     : "好玩的相遇，正在發生。"
                   : "Bingo！你們做到了。"
             }}
@@ -897,8 +966,10 @@ onUnmounted(() => {
                   ? callerMode
                     ? "玩家正在準備答案"
                     : "這一場的共同話題"
-                  : callerMode
-                    ? "主持人公布答案"
+                  : turnMode
+                    ? "分組輪流出題"
+                    : callerMode
+                      ? "主持人公布答案"
                     : "全場共用主板"
               }}
             </h2>
@@ -908,10 +979,116 @@ onUnmounted(() => {
             每支手機都是這份排列，找到符合描述的朋友，請他簽名。
           </p>
           <p v-else class="muted small">
-            每位玩家有自己的九宮格；公布答案後，符合的玩家就能在手機上圈選。
+            {{
+              turnMode
+                ? "每位玩家有自己的十六格答案；各組輪流提出一題，由主持人審核。"
+                : "每位玩家有自己的九宮格；公布答案後，符合的玩家就能在手機上圈選。"
+            }}
           </p>
+          <section
+            v-if="turnMode && game.room.status === 'playing'"
+            class="turn-console"
+          >
+            <div class="turn-heading">
+              <div>
+                <span class="mini-label">CURRENT TURN</span>
+                <h3>輪到 {{ activeGroup }}</h3>
+              </div>
+              <button
+                type="button"
+                class="secondary"
+                :disabled="game.busy"
+                @click="game.send({ type: 'skip_turn' })"
+              >
+                跳過這組 →
+              </button>
+            </div>
+            <div v-if="game.room.pending" class="proposal-card">
+              <div>
+                <small
+                  >{{ game.room.pending.group }} ·
+                  {{ game.room.pending.playerName }} 提出</small
+                >
+                <strong>{{ game.room.pending.answer }}</strong>
+              </div>
+              <div class="proposal-actions">
+                <button
+                  type="button"
+                  class="secondary"
+                  :disabled="game.busy"
+                  @click="
+                    game.send({
+                      type: 'proposal_decision',
+                      id: game.room.pending?.id,
+                      decision: 'reject',
+                    })
+                  "
+                >
+                  駁回重選
+                </button>
+                <button
+                  type="button"
+                  class="primary"
+                  :disabled="game.busy"
+                  @click="
+                    game.send({
+                      type: 'proposal_decision',
+                      id: game.room.pending?.id,
+                      decision: 'approve',
+                    })
+                  "
+                >
+                  通過並公布 ✓
+                </button>
+              </div>
+            </div>
+            <p v-else class="turn-waiting">
+              等待 {{ activeGroup }} 的成員從自己的賓果卡選一題。
+            </p>
+            <div v-if="game.room.appeals.length" class="appeal-list">
+              <p class="mini-label">同答案判定申請</p>
+              <article v-for="appeal in game.room.appeals" :key="appeal.id">
+                <div>
+                  <small>{{ appeal.group }} · {{ appeal.playerName }}</small>
+                  <strong
+                    >「{{ appeal.answer }}」＝「{{ appeal.called }}」？</strong
+                  >
+                </div>
+                <div>
+                  <button
+                    type="button"
+                    class="secondary"
+                    :disabled="game.busy"
+                    @click="
+                      game.send({
+                        type: 'appeal_decision',
+                        id: appeal.id,
+                        decision: 'reject',
+                      })
+                    "
+                  >
+                    不通過
+                  </button>
+                  <button
+                    type="button"
+                    class="primary"
+                    :disabled="game.busy"
+                    @click="
+                      game.send({
+                        type: 'appeal_decision',
+                        id: appeal.id,
+                        decision: 'approve',
+                      })
+                    "
+                  >
+                    視為同答案
+                  </button>
+                </div>
+              </article>
+            </div>
+          </section>
           <form
-            v-if="callerMode && game.room.status === 'playing'"
+            v-if="callerMode && !turnMode && game.room.status === 'playing'"
             class="call-console"
             @submit.prevent="publishCall"
           >
@@ -954,7 +1131,7 @@ onUnmounted(() => {
               <p>
                 {{
                   game.room.status === "lobby"
-                    ? "等待玩家填滿九宮格"
+                    ? `等待玩家填滿 ${game.room.settings.size ** 2} 格答案`
                     : "還沒有公布答案"
                 }}
               </p>
@@ -969,6 +1146,28 @@ onUnmounted(() => {
               </li>
             </ol>
           </div>
+          <section v-if="turnMode" class="answer-overview">
+            <div class="panel-title">
+              <h3>玩家答案總覽</h3>
+              <span class="muted">主持人專用</span>
+            </div>
+            <div class="answer-board-list">
+              <article v-for="player in game.room.players" :key="player.id">
+                <header>
+                  <strong>{{ player.name }}</strong>
+                  <span>{{ player.group }} · {{ player.ready ? "已填滿" : "填寫中" }}</span>
+                </header>
+                <ol>
+                  <li
+                    v-for="index in game.room.settings.size ** 2"
+                    :key="index"
+                  >
+                    {{ game.playerAnswers[player.id]?.[index - 1] || "—" }}
+                  </li>
+                </ol>
+              </article>
+            </div>
+          </section>
           <div
             v-else
             class="bingo-grid host-grid"
@@ -1069,7 +1268,8 @@ onUnmounted(() => {
             </button>
             <p v-if="game.room.status === 'lobby'" class="field-help">
               <template v-if="callerMode && !allCallerPlayersReady"
-                >請等所有玩家填滿九宮格。</template
+                >請等所有玩家填滿
+                {{ game.room.settings.size ** 2 }} 格答案。</template
               >
               <template v-else
                 >至少
@@ -1142,7 +1342,7 @@ onUnmounted(() => {
         <p v-if="game.room.status === 'lobby'">
           {{
             callerMode
-              ? `你是 ${current?.group}，請先填滿自己的九宮格。`
+              ? `你是 ${current?.group}，請先填滿自己的 ${game.room.settings.size ** 2} 格答案。`
               : "你已加入！等主持人開始，就去認識新朋友。"
           }}
         </p>
@@ -1154,8 +1354,10 @@ onUnmounted(() => {
         </p>
         <p v-else>
           {{
-            callerMode
-              ? "主持人公布答案後，符合的格子就可以圈起來。"
+            turnMode
+              ? `${activeGroup} 正在出題；輪到你的組時，從自己的格子選一題。`
+              : callerMode
+                ? "主持人公布答案後，符合的格子就可以圈起來。"
               : "點一格，把手機交給符合描述的朋友簽名。"
           }}
         </p>
@@ -1185,20 +1387,23 @@ onUnmounted(() => {
           <div>
             <strong
               >{{ Object.keys(game.me?.answers || {}).length
-              }}<small> / 9 格</small></strong
+              }}<small> / {{ answerCount }} 格</small></strong
             ><span>{{ current?.ready ? "準備完成 ✓" : "點格子填答案" }}</span>
           </div>
           <div class="progress-track">
             <i
               :style="{
-                width: `${(Object.keys(game.me?.answers || {}).length / 9) * 100}%`,
+                width: `${(Object.keys(game.me?.answers || {}).length / answerCount) * 100}%`,
               }"
             />
           </div>
         </div>
-        <div class="bingo-grid player-grid answer-grid" style="--size: 3">
+        <div
+          class="bingo-grid player-grid answer-grid"
+          :style="{ '--size': game.room.settings.size }"
+        >
           <button
-            v-for="i in 9"
+            v-for="i in answerCount"
             :key="i"
             class="cell"
             :class="{ filled: game.me?.answers[i - 1] }"
@@ -1245,16 +1450,35 @@ onUnmounted(() => {
             />
           </div>
         </div>
+        <section v-if="turnMode" class="player-turn-card">
+          <span class="mini-label">GROUP TURN</span>
+          <h2>
+            {{
+              game.room.pending
+                ? `${game.room.pending.group} 已提出「${game.room.pending.answer}」`
+                : `輪到 ${activeGroup}`
+            }}
+          </h2>
+          <p v-if="game.room.pending">
+            等待主持人通過或駁回；其他人可以先查看自己的進度。
+          </p>
+          <p v-else-if="myTurn">輪到你的組了，點一個尚未公布的格子送出。</p>
+          <p v-else>等待 {{ activeGroup }} 選擇一個答案。</p>
+        </section>
         <div v-if="callerMode && game.room.called.length" class="latest-call">
-          <span>主持人剛公布</span
+          <span>{{ turnMode ? "剛通過的答案" : "主持人剛公布" }}</span
           ><strong>{{ game.room.called[game.room.called.length - 1] }}</strong>
         </div>
         <div
           class="bingo-grid player-grid"
-          :style="{ '--size': callerMode ? 3 : game.room.settings.size }"
+          :style="{ '--size': game.room.settings.size }"
         >
           <button
-            v-for="(q, i) in callerMode ? Array(9).fill('') : game.room.board"
+            v-for="(q, i) in
+              callerMode
+                ? Array(game.room.settings.size ** 2).fill('')
+                : game.room.board
+            "
             :key="i"
             class="cell"
             :class="{
@@ -1264,7 +1488,9 @@ onUnmounted(() => {
             }"
             :disabled="
               callerMode
-                ? !canSign || !isClaimable(i) || !!game.me?.marks[i]
+                ? !canSign ||
+                  !!game.me?.marks[i] ||
+                  (!isClaimable(i) && !(turnMode && myTurn))
                 : !canSign || !!game.me?.marks[i]
             "
             :aria-label="
@@ -1272,7 +1498,13 @@ onUnmounted(() => {
                 ? `${game.me?.answers[i]}${game.me?.marks[i] ? '，已圈選' : isClaimable(i) ? '，可以圈選' : '，尚未公布'}`
                 : `${q}${game.me?.marks[i] ? '，已簽名' : '，點擊簽名'}`
             "
-            @click="callerMode ? claim(i) : (selected = i)"
+            @click="
+              callerMode
+                ? isClaimable(i)
+                  ? claim(i)
+                  : propose(i)
+                : (selected = i)
+            "
           >
             <span class="cell-number">{{ String(i + 1).padStart(2, "0") }}</span
             ><strong>{{ callerMode ? game.me?.answers[i] : q }}</strong
@@ -1284,7 +1516,9 @@ onUnmounted(() => {
               :src="game.me.marks[i].ink"
               alt="手寫簽名"
             />
-            <span v-else class="cell-plus">＋</span>
+            <span v-else class="cell-plus">{{
+              turnMode && myTurn ? "送出" : "＋"
+            }}</span>
           </button>
         </div>
         <p class="player-hint">
@@ -1293,6 +1527,26 @@ onUnmounted(() => {
             callerMode ? "亮起的答案可以點擊圈選" : "已簽名的格子會自動計算連線"
           }}
         </p>
+        <button
+          v-if="turnMode && game.room.called.length"
+          type="button"
+          class="secondary full appeal-button"
+          :disabled="game.busy"
+          @click="openAppeal"
+        >
+          有錯字或簡稱？提出同答案申請
+        </button>
+        <section
+          v-if="turnMode && game.room.appeals.length"
+          class="public-appeals"
+        >
+          <p class="mini-label">等待主持人判定</p>
+          <article v-for="appeal in game.room.appeals" :key="appeal.id">
+            {{ appeal.playerName }} 申請「{{ appeal.answer }}」＝「{{
+              appeal.called
+            }}」
+          </article>
+        </section>
         <section v-if="game.room.winners.length" class="mobile-winners">
           <p class="eyebrow">BINGO MOMENTS</p>
           <h2>
@@ -1414,6 +1668,68 @@ onUnmounted(() => {
             :disabled="game.busy || !answerValue.trim()"
           >
             {{ game.busy ? "儲存中…" : "放進九宮格 ✓" }}
+          </button>
+        </form>
+      </section>
+    </div>
+    <div
+      v-if="appealOpen && turnMode && game.room"
+      class="overlay"
+      @click.self="appealOpen = false"
+    >
+      <section
+        class="signature-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="appeal-title"
+      >
+        <button
+          class="close-button"
+          aria-label="關閉"
+          :disabled="game.busy"
+          @click="appealOpen = false"
+        >
+          ×
+        </button>
+        <p class="eyebrow">ANSWER REVIEW</p>
+        <h2 id="appeal-title">申請視為同一個答案</h2>
+        <p class="muted">
+          適用於錯字、簡稱或別名。主持人通過後，所有相同寫法都能圈選。
+        </p>
+        <form @submit.prevent="submitAppeal">
+          <label
+            >我的答案
+            <select v-model="appealIndex" required>
+              <option :value="null" disabled>選擇自己的格子</option>
+              <option
+                v-for="(answer, index) in game.me?.answers"
+                :key="index"
+                :value="Number(index)"
+                :disabled="!!game.me?.marks[Number(index)]"
+              >
+                {{ answer }}
+              </option>
+            </select>
+          </label>
+          <label
+            >要對應的已公布答案
+            <select v-model="appealCalled" required>
+              <option
+                v-for="answer in game.room.called"
+                :key="answer"
+                :value="answer"
+              >
+                {{ answer }}
+              </option>
+            </select>
+          </label>
+          <button
+            class="primary full"
+            :disabled="
+              game.busy || appealIndex === null || !appealCalled.trim()
+            "
+          >
+            送出給主持人審核 →
           </button>
         </form>
       </section>

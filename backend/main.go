@@ -37,6 +37,9 @@ type Message struct {
 	Settings  Settings  `json:"settings"`
 	Index     int       `json:"index"`
 	Value     string    `json:"value"`
+	ID        string    `json:"id"`
+	Decision  string    `json:"decision"`
+	Called    string    `json:"called"`
 	Signature Signature `json:"signature"`
 }
 
@@ -67,6 +70,7 @@ func (s *Server) broadcast(r *Room) {
 		if c.room == r {
 			var me any
 			var winnerBoards map[string]map[int]Signature
+			var playerAnswers map[string]map[int]string
 			if c.player != nil {
 				me = map[string]any{"id": c.player.ID, "marks": c.player.Marks, "answers": c.player.Answers}
 			}
@@ -75,8 +79,17 @@ func (s *Server) broadcast(r *Room) {
 				for _, winner := range r.Winners {
 					winnerBoards[winner.ID] = winner.Marks
 				}
+				if r.Settings.Mode == "turns" {
+					playerAnswers = make(map[string]map[int]string, len(r.Players))
+					for _, player := range r.Players {
+						playerAnswers[player.ID] = player.Answers
+					}
+				}
 			}
-			c.emit(map[string]any{"type": "state", "room": r, "me": me, "host": c.host, "winnerBoards": winnerBoards})
+			c.emit(map[string]any{
+				"type": "state", "room": r, "me": me, "host": c.host,
+				"winnerBoards": winnerBoards, "playerAnswers": playerAnswers,
+			})
 		}
 	}
 }
@@ -129,7 +142,7 @@ func (s *Server) handle(c *Client, m Message) {
 					}
 				}
 			} else {
-				if r.Status == "finished" || (r.Settings.Mode == "caller" && r.Status != "lobby") {
+				if r.Status == "finished" || ((r.Settings.Mode == "caller" || r.Settings.Mode == "turns") && r.Status != "lobby") {
 					fail("遊戲已開始，請等待下一場")
 					return
 				}
@@ -149,7 +162,7 @@ func (s *Server) handle(c *Client, m Message) {
 					return
 				}
 				group := ""
-				if r.Settings.Mode == "caller" {
+				if r.Settings.Mode == "caller" || r.Settings.Mode == "turns" {
 					for groupIndex := 0; groupIndex < r.Settings.Groups; groupIndex++ {
 						if m.Group == groupLabel(groupIndex) {
 							group = m.Group
@@ -215,16 +228,19 @@ func (s *Server) handle(c *Client, m Message) {
 			fail(fmt.Sprintf("至少需要 %d 位玩家才能開始", r.Settings.Winners))
 			return
 		}
-		if r.Settings.Mode == "caller" {
+		if r.Settings.Mode == "caller" || r.Settings.Mode == "turns" {
 			for _, player := range r.Players {
 				if !player.Ready {
-					fail("請等所有玩家填滿九宮格後再開始")
+					fail(fmt.Sprintf("請等所有玩家填滿 %d 格答案後再開始", r.Settings.Size*r.Settings.Size))
 					return
 				}
 			}
 		}
 		r.Status = "playing"
 		r.StartedAt = time.Now().UnixMilli()
+		if r.Settings.Mode == "turns" {
+			r.initializeTurn()
+		}
 	case "sign":
 		if c.player == nil {
 			fail("主持人不能代替玩家簽名")
@@ -261,6 +277,51 @@ func (s *Server) handle(c *Client, m Message) {
 			fail(err.Error())
 			return
 		}
+	case "propose":
+		if c.player == nil {
+			fail("只有玩家可以代表組別提出答案")
+			return
+		}
+		if err := r.propose(c.player, m.Index); err != nil {
+			fail(err.Error())
+			return
+		}
+	case "proposal_decision":
+		if !c.host {
+			fail("只有主持人可以審核答案")
+			return
+		}
+		if err := r.reviewProposal(m.ID, m.Decision); err != nil {
+			fail(err.Error())
+			return
+		}
+	case "skip_turn":
+		if !c.host {
+			fail("只有主持人可以跳過組別")
+			return
+		}
+		if err := r.skipTurn(); err != nil {
+			fail(err.Error())
+			return
+		}
+	case "appeal":
+		if c.player == nil {
+			fail("只有玩家可以提出同答案申請")
+			return
+		}
+		if err := r.requestMatch(c.player, m.Index, m.Called); err != nil {
+			fail(err.Error())
+			return
+		}
+	case "appeal_decision":
+		if !c.host {
+			fail("只有主持人可以審核同答案申請")
+			return
+		}
+		if err := r.reviewAppeal(m.ID, m.Decision); err != nil {
+			fail(err.Error())
+			return
+		}
 	case "reset":
 		if !c.host {
 			fail("只有主持人可以重開")
@@ -275,6 +336,10 @@ func (s *Server) handle(c *Client, m Message) {
 		r.StartedAt = 0
 		r.Winners = []*Player{}
 		r.Called = []string{}
+		r.TurnIndex = 0
+		r.Pending = nil
+		r.Appeals = []*MatchAppeal{}
+		r.ApprovedMatches = map[string]string{}
 		r.Board = draw(r.Settings)
 		for _, p := range r.Players {
 			p.Marks = map[int]Signature{}

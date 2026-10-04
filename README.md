@@ -1,6 +1,6 @@
 # Bingo! 找到彼此的共同點
 
-參考 beauty-game 的 Go + Gin + Gorilla WebSocket、Vue 3 + TypeScript + Vite + Pinia 架構建立的獨立遊戲，包含「互相簽名」與「分組猜答案」兩種玩法。
+參考 beauty-game 的 Go + Gin + Gorilla WebSocket、Vue 3 + TypeScript + Vite + Pinia 架構建立的獨立遊戲，包含「互相簽名」、「主持人出題」與「分組輪流出題」三種玩法。
 
 ## 開始玩
 
@@ -26,6 +26,15 @@
 4. 所有人填滿後主持人開始遊戲，口頭說出答案並在主板輸入「公布答案」。玩家輸入及主持人公布時都有內建題庫建議，主持人也可按「隨機帶入」抽出尚未公布的參考答案。
 5. 玩家格子與已公布答案相符時會亮起，玩家點擊即可圈選。伺服器會再次核對，未公布的格子不能提前圈選。
 6. 橫、直、對角線的連線與得獎名額沿用原本設定，主板會即時顯示組別、圈選格數、線數與名次。
+
+## 分組輪流出題
+
+1. 此玩法固定使用 4 × 4；每位玩家先填入 16 個不重複答案，再由主持人開始遊戲。
+2. A、B、C…組依序輪流。輪到的組別可由任一成員從自己的賓果卡選一題提出；第一筆送出的答案會等待主持人審核。
+3. 主持人可「通過並公布」、「駁回重選」或「跳過這組」。通過後自動換下一個有玩家的組別，空組會自動略過。
+4. 所有玩家都會看到目前組別、待審答案與已公布答案；擁有相同答案的人可一起圈選。
+5. 若答案有錯字、簡稱或別名，玩家可提出同答案申請，例如「台彎大學＝台灣大學」或「北大＝台北大學」。申請全房可見，由主持人決定通過或駁回。
+6. 同答案申請通過後，相同寫法會對全體玩家生效；主持人另有玩家答案總覽，可在審核時核對每個人的 16 格內容。
 
 ## 連線與狀態
 
@@ -66,5 +75,5 @@ docker compose up -d --build
 - `frontend/src/App.vue`：建房、加入、大廳、主板、玩家格子、頒獎。
 - `frontend/src/components/SignaturePad.vue`：觸控 / 滑鼠手寫簽名。
 
-客戶端指令：`create {settings}`、`join {room,name,group}`、`resume {room,token}`、`leave`、`start`、`sign {index,signature:{name,ink}}`、`answer {index,value}`、`call {value}`、`claim {index}`、`end`、`reset`。
+客戶端指令：`create {settings}`、`join {room,name,group}`、`resume {room,token}`、`leave`、`start`、`sign {index,signature:{name,ink}}`、`answer {index,value}`、`call {value}`、`propose {index}`、`proposal_decision {id,decision}`、`skip_turn`、`appeal {index,called}`、`appeal_decision {id,decision}`、`claim {index}`、`end`、`reset`。
 伺服器事件：`session {room,token,host}`、`state {room,me,host}`、`error {message}`。房間狀態：`lobby → playing → finished → lobby`。
